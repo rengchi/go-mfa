@@ -18,7 +18,6 @@ func ValidateCode(secret, code string) bool {
 
 // padBase32Secret 为密钥添加 Base32 的填充字符。
 func padBase32Secret(secret string) string {
-	// Base32 编码长度需是 8 的倍数
 	missingPadding := len(secret) % 8
 	if missingPadding != 0 {
 		secret += strings.Repeat("=", 8-missingPadding)
@@ -28,60 +27,76 @@ func padBase32Secret(secret string) string {
 
 // GenerateDynamicCode 使用提供的密钥生成当前时间的动态验证码。
 func GenerateDynamicCode(secret string) (string, error) {
-	// 为密钥添加填充
+	// 为密钥添加 Base32 填充字符
 	secret = padBase32Secret(secret)
 
-	// 生成基于当前时间的动态验证码
-	code, err := totp.GenerateCode(secret, time.Now()) // 直接使用密钥字符串
+	// 尝试生成动态验证码
+	code, err := totp.GenerateCode(secret, time.Now())
 	if err != nil {
+		// 检查是否是 Base32 解码失败的错误
+		if strings.Contains(err.Error(), "Decoding of secret as base32 failed") {
+			return "", fmt.Errorf("无法解码密钥，密钥格式可能不正确或已损坏，请检查密钥的正确性: %w", err)
+		}
+		// 其他错误处理
 		return "", fmt.Errorf("无法生成动态验证码: %w", err)
 	}
 	return code, nil
 }
 
-// saveToDatabase 保存名称和密钥到数据库，如果已存在则提示是否替换，并返回密钥和错误
-func saveToDatabase(db *sql.DB, name, secret string) (string, error) {
+// saveToDatabase 保存名称和密钥到数据库，如果已存在则返回错误而不保存。
+func saveToDatabase(db *sql.DB, name, secret string) error {
+	// 开始事务
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始事务时出错: %w", err)
+	}
+
 	// 检查名称是否已存在
 	var existingSecret string
-	err := db.QueryRow("SELECT secret FROM mfa_secret WHERE name = ?", name).Scan(&existingSecret)
+	err = tx.QueryRow("SELECT secret FROM mfa_secret WHERE name = ?", name).Scan(&existingSecret)
 
-	switch {
-	case err == nil:
-		// 不替换，返回数据库中的secret
-		return existingSecret, nil
-
-		// // 名称已存在，提示是否替换
-		// fmt.Printf("名称 '%s' 已存在，当前密钥为：%s\n", name, existingSecret)
-		// var choice string
-		// fmt.Print("是否替换现有的密钥？(y/n): ")
-		// fmt.Scanln(&choice)
-
-		// if choice == "y" || choice == "Y" {
-		// 	// 替换密钥
-		// 	_, err = db.Exec("UPDATE mfa_secret SET secret = ? WHERE name = ?", secret, name)
-		// 	if err != nil {
-		// 		return "", fmt.Errorf("更新记录时出错: %w", err)
-		// 	}
-		// 	fmt.Println("密钥已更新！")
-		// 	return secret, nil
-		// } else {
-		// 	fmt.Println("密钥未更新。")
-		// 	return existingSecret, nil
-		// }
-
-	case err == sql.ErrNoRows:
-		// 名称不存在，插入新记录
-		_, err = db.Exec("INSERT INTO mfa_secret (name, secret) VALUES (?, ?)", name, secret)
+	switch err {
+	case nil:
+		// 如果已存在，直接返回
+		tx.Rollback() // 没有更改数据库，回滚事务
+		return nil
+	case sql.ErrNoRows:
+		// 如果不存在，插入新记录
+		_, err = tx.Exec("INSERT INTO mfa_secret (name, secret) VALUES (?, ?)", name, secret)
 		if err != nil {
-			return "", fmt.Errorf("插入记录时出错: %w", err)
+			tx.Rollback()
+			return fmt.Errorf("插入记录时出错: %w", err)
 		}
-		fmt.Println("新密钥已保存！")
-		return secret, nil
-
+		// 提交事务
+		err = tx.Commit()
+		if err != nil {
+			return fmt.Errorf("提交事务时出错: %w", err)
+		}
+		return nil
 	default:
-		// 处理其他类型的错误
-		return "", fmt.Errorf("查询数据库时出错: %w", err)
+		tx.Rollback()
+		return fmt.Errorf("查询数据库时出错: %w", err)
 	}
+}
+
+// createTable 如果 mfa_secret 表不存在，则创建表
+func createTableIfNotExists(db *sql.DB) error {
+	// 创建表语句
+	createTableQuery := `
+	CREATE TABLE IF NOT EXISTS mfa_secret (
+		id INT AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		secret VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(name)  -- 确保名称唯一
+	);`
+
+	// 执行创建表的查询
+	_, err := db.Exec(createTableQuery)
+	if err != nil {
+		return fmt.Errorf("创建表时出错: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -89,43 +104,68 @@ func main() {
 	dsn := "root:root@tcp(127.0.0.1:3306)/go_mfa" // 替换为实际的 MySQL 用户名、密码和数据库名
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Fatalf("无法连接到数据库: %v", err)
+		// 数据库连接配置错误，输出具体的错误信息
+		log.Fatalf("无法连接到数据库配置: %v\n\n请检查以下几项:\n1. 确保数据库连接字符串格式正确，包括用户名、密码、数据库名、主机地址和端口\n2. 确保使用的数据库驱动程序和版本与你的 MySQL 数据库兼容\n3. 检查数据库连接字符串中的特殊字符是否需要转义", err)
 	}
 	defer db.Close()
 
 	// 配置数据库连接池
-	// 最大连接池生命周期（最大生存时间）
-	db.SetConnMaxLifetime(time.Minute * 3) // 可以根据实际需要调整（比如 3 分钟）
-	// 最大打开连接数
-	db.SetMaxOpenConns(10) // 根据应用的负载来调整最大连接数
-	// 最大空闲连接数
-	db.SetMaxIdleConns(10) // 根据数据库和应用负载来调整空闲连接数
+	db.SetConnMaxLifetime(time.Minute * 3)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
 
 	// 检查数据库连接是否成功
 	if err = db.Ping(); err != nil {
-		log.Fatalf("无法连接到 MySQL 数据库: %v", err)
+		// 数据库连接失败，输出更加详细的错误信息
+		log.Fatalf("无法连接到 MySQL 数据库: %v\n\n请检查以下几项:\n1. 确保 MySQL 数据库已启动并在 127.0.0.1:3306 端口监听\n2. 确保防火墙没有阻止该端口\n3. 检查数据库用户名、密码是否正确\n4. 如果数据库在远程服务器上，确保网络连接正常", err)
 	}
 	fmt.Println("成功连接到数据库！")
 
-	// 名称和密钥
-	var name, secret string
+	// 确保表存在
+	err = createTableIfNotExists(db)
+	if err != nil {
+		log.Fatalf("创建数据库表时出错: %v", err)
+	}
 
 	// 用户输入名称和密钥
+	var name, secret string
+	var code, existingSecret string // 声明code和existingSecret变量
+
+	// 输入名称
 	fmt.Print("请输入 TOTP 名称: ")
 	fmt.Scanln(&name)
+
+	// 查询数据库，检查名称是否存在
+	err = db.QueryRow("SELECT secret FROM mfa_secret WHERE name = ?", name).Scan(&existingSecret)
+	if err == nil {
+		// 如果名称已存在，直接生成动态验证码。并测试生成验证码
+		code, err = GenerateDynamicCode(existingSecret) // 使用 `err =` 来更新错误变量
+		if err != nil {
+			log.Fatalf("生成动态验证码时出错！%v", err)
+		}
+
+		fmt.Printf("当前时间的动态验证码为: %s\n", code)
+		return
+	} else if err != sql.ErrNoRows {
+		log.Fatalf("查询数据库时出错: %v", err)
+	}
+
+	// 如果名称不存在，提示输入密钥
 	fmt.Print("请输入 TOTP 密钥: ")
 	fmt.Scanln(&secret)
 
-	// 保存或更新到数据库
-	resultSecret, err := saveToDatabase(db, name, secret)
+	// 先生成验证码以确保密钥有效
+	code, err = GenerateDynamicCode(secret) // 使用 `err =` 来更新错误变量
+	if err != nil {
+		log.Fatalf("生成动态验证码时出错！%v", err)
+	}
+
+	// 保存或更新密钥到数据库
+	err = saveToDatabase(db, name, secret)
 	if err != nil {
 		log.Fatalf("保存数据时出错: %v", err)
 	}
 
-	// 第一步：生成当前时间的动态验证码
-	currentCode, err := GenerateDynamicCode(resultSecret)
-	if err != nil {
-		log.Fatalf("生成动态验证码时出错: %v", err)
-	}
-	fmt.Printf("当前时间的动态验证码为: %s\n", currentCode)
+	// 输出生成的动态验证码
+	fmt.Printf("当前时间的动态验证码为: %s\n", code)
 }
