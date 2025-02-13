@@ -9,7 +9,19 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/pquerna/otp/totp"
+	"github.com/rengchi/ji"
 )
+
+// Config config.json配置
+type Config struct {
+	Type     string `json:"type"`
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	User     string `json:"user"`
+	Passwd   string `json:"passwd"`
+	Database string `json:"database"`
+	Prefix   string `json:"prefix"`
+}
 
 // ValidateCode 验证给定的 TOTP 动态验证码是否有效。
 func ValidateCode(secret, code string) bool {
@@ -100,8 +112,14 @@ func createTableIfNotExists(db *sql.DB) error {
 }
 
 func main() {
+	// 读取配置文件
+	var conf = &Config{}
+	err := ji.ReadJSONFromFile("./config.json", conf)
+	if err != nil {
+		log.Fatalf("请检查：%v文件是否存在，格式参考：%v\n", "./config.json", "./example.config.json")
+	}
 	// MySQL 连接
-	dsn := "root:root@tcp(127.0.0.1:3306)/go_mfa" // 替换为实际的 MySQL 用户名、密码和数据库名
+	dsn := ji.Assemble(conf.User, ":", conf.Passwd, "@tcp(", conf.Host, ":", conf.Port, ")/", conf.Database) // 替换为实际的 MySQL 用户名、密码和数据库名
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		// 数据库连接配置错误，输出具体的错误信息
@@ -117,7 +135,7 @@ func main() {
 	// 检查数据库连接是否成功
 	if err = db.Ping(); err != nil {
 		// 数据库连接失败，输出更加详细的错误信息
-		log.Fatalf("无法连接到 MySQL 数据库: %v\n\n请检查以下几项:\n1. 确保 MySQL 数据库已启动并在 127.0.0.1:3306 端口监听\n2. 确保防火墙没有阻止该端口\n3. 检查数据库用户名、密码是否正确\n4. 如果数据库在远程服务器上，确保网络连接正常", err)
+		log.Fatalf("无法连接到 MySQL 数据库: %v\n\n请检查以下几项:\n1. 确保 MySQL 数据库已启动并在 %v:%v 端口监听\n2. 确保防火墙没有阻止该端口\n3. 检查数据库用户名、密码是否正确\n4. 如果数据库在远程服务器上，确保网络连接正常", err, conf.Host, conf.Port)
 	}
 	fmt.Println("成功连接到数据库！")
 
