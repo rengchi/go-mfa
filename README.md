@@ -12,6 +12,8 @@ git clone git@github.com:rengchi/go-mfa.git
 
 ## 使用
 
+> 将文件 `example.config.json` 复制并保存为 `config.json` 文件，修改为正确的数据库配置
+
 ```
 PS D:\proj\go\src\github.com\go-mfa> go run .\main.go
 成功连接到数据库！
