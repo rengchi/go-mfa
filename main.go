@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,9 +116,19 @@ func createTableIfNotExists(db *sql.DB) error {
 func main() {
 	// 读取配置文件
 	var conf = &Config{}
-	err := ji.ReadJSONFromFile("./config.json", conf)
+	configFileName := "config.json"
+	// 获取可执行文件所在路径
+	executablePath, err := os.Executable()
 	if err != nil {
-		log.Fatalf("请检查：%v文件是否存在，格式参考：%v\n", "./config.json", "./example.config.json")
+		fmt.Println("获取可执行文件路径时出错：", err)
+		return
+	}
+	// 获取配置文件所在的目录
+	configFilePath := filepath.Join(filepath.Dir(executablePath), configFileName)
+
+	err = ji.ReadJSONFromFile(configFilePath, conf)
+	if err != nil {
+		log.Fatalf("请检查：%v文件是否存在，格式参考：%v\n", "config.json", "https://github.com/rengchi/go-mfa/blob/main/example.config.json")
 	}
 	// MySQL 连接
 	dsn := ji.Assemble(conf.User, ":", conf.Passwd, "@tcp(", conf.Host, ":", conf.Port, ")/", conf.Database) // 替换为实际的 MySQL 用户名、密码和数据库名
