@@ -5,7 +5,7 @@ go 1.23.5
 require (
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/pquerna/otp v1.4.0
-	github.com/rengchi/ji v0.0.3
+	github.com/rengchi/ji v0.0.4
 )
 
 require (
